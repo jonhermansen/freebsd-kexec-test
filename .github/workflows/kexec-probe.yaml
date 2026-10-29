@@ -1,0 +1,42 @@
+name: Kexec Survival Probe
+
+# Does a GHA job survive a KERNEL reboot? Hosted ubuntu-latest is a full VM
+# with sudo, so it can kexec. If the "after" step never runs, the job did not
+# survive — which settles the FreeBSD question (that needs a kernel swap too).
+on:
+  workflow_dispatch:
+
+jobs:
+  kexec-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Before kexec
+        run: |
+          echo "=== BEFORE KEXEC ==="
+          BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
+          echo "boot_id=$BOOT_ID"
+          echo "kernel=$(uname -r)  uptime=$(cut -d. -f1 /proc/uptime)s"
+          echo "runner procs:"; pgrep -af 'Runner\.(Listener|Worker)' || true
+          echo "$BOOT_ID" | sudo tee /var/tmp/pre-boot-id >/dev/null
+
+      - name: Fire kexec (kernel reboot into the same kernel)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y kexec-tools
+          K=$(uname -r)
+          echo "loading /boot/vmlinuz-$K ..."
+          ls -la /boot/ | grep -E "vmlinuz|initrd" || true
+          sudo kexec -l "/boot/vmlinuz-$K" --initrd="/boot/initrd.img-$K" --reuse-cmdline
+          echo "=== firing kexec -e now; if the job survives, the next step runs ==="
+          sync
+          sudo kexec -e
+          sleep 60
+          echo "STILL ALIVE 60s after kexec -e (unexpected — kexec may be blocked here)"
+
+      - name: After kexec (runs only if the job survived)
+        run: |
+          echo "=== AFTER KEXEC ==="
+          NEW=$(cat /proc/sys/kernel/random/boot_id)
+          PRE=$(cat /var/tmp/pre-boot-id 2>/dev/null || echo '?')
+          echo "new_boot_id=$NEW  pre_boot_id=$PRE  uptime=$(cut -d. -f1 /proc/uptime)s"
+          [ "$NEW" != "$PRE" ] && echo "*** JOB SURVIVED A KERNEL REBOOT — boot_id changed! ***" || echo "(same boot — kexec did not fire)"
